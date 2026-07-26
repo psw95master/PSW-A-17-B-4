@@ -43,7 +43,7 @@ async function fetchImageBlocks(files = []) {
 
 // Runs one turn against the Agent SDK, updating a Slack status message as it goes.
 // Only posts final assistant text — tool_use/tool_result bodies never reach Slack.
-async function runTurn({ client, channel, threadTs, sessionKey, text, files }) {
+async function runTurn({ client, channel, threadTs, sessionKey, text, files, user }) {
   const statusMsg = await client.chat.postMessage({
     channel,
     thread_ts: threadTs,
@@ -102,10 +102,13 @@ async function runTurn({ client, channel, threadTs, sessionKey, text, files }) {
     text: ':white_check_mark: 답변 완료',
   });
 
+  // Thread-reply push notifications are far less reliable without an explicit
+  // mention — "all new posts" channel settings mainly govern top-level messages.
+  const mention = user ? `<@${user}> ` : '';
   const answerMsg = await client.chat.postMessage({
     channel,
     thread_ts: threadTs,
-    text: finalText || '(응답 없음)',
+    text: `${mention}${finalText || '(응답 없음)'}`,
   });
 
   return answerMsg.ts;
@@ -126,6 +129,7 @@ async function handleQuestion({ client, event, sessionKey, rawText }) {
     sessionKey,
     text,
     files: event.files,
+    user: event.user,
   });
 
   if (isLogSave) {
