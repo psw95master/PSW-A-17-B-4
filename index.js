@@ -52,10 +52,10 @@ async function runTurn({ client, channel, threadTs, sessionKey, text, files }) {
 
   const session = sessions.get(sessionKey);
   const imageBlocks = await fetchImageBlocks(files);
-  const content = imageBlocks.length ? [{ type: 'text', text }, ...imageBlocks] : text;
+  const content = [{ type: 'text', text: text || '(첨부 이미지 확인해줘)' }, ...imageBlocks];
 
   const q = query({
-    prompt: text && imageBlocks.length
+    prompt: imageBlocks.length
       ? (async function* () {
           yield { type: 'user', message: { role: 'user', content }, parent_tool_use_id: null };
         })()
@@ -138,15 +138,43 @@ app.event('message', async ({ event, client }) => {
   await handleQuestion({ client, event, sessionKey, rawText: event.text });
 });
 
-// Edited-to-add-tag case, DM only for now — channel edits need the message.channels
-// event subscription (broader scope, not requested yet). ponytail: add that scope +
-// this same branch for channels if the edit-to-tag flow turns out to matter there too.
+// Edited-to-add-tag case. DM edits are a no-op in practice (the original message
+// already got answered, handledTs dedupes it) — this branch is really for channels,
+// where an untagged message never fired app_mention and so was never answered.
 app.event('message', async ({ event, client }) => {
-  if (event.subtype !== 'message_changed' || event.channel_type !== 'im') return;
+  if (event.subtype !== 'message_changed') return;
   const msg = event.message;
   if (msg.bot_id) return;
-  const sessionKey = `dm:${msg.user}`;
+
+  if (event.channel_type === 'im') {
+    const sessionKey = `dm:${msg.user}`;
+    await handleQuestion({ client, event: { ...msg, channel: event.channel }, sessionKey, rawText: msg.text });
+    return;
+  }
+
+  if (!botUserId || !msg.text?.includes(`<@${botUserId}>`)) return; // only react if the edit added our tag
+  const sessionKey = `channel:${event.channel}:${msg.thread_ts || msg.ts}`;
   await handleQuestion({ client, event: { ...msg, channel: event.channel }, sessionKey, rawText: msg.text });
+});
+
+// Slack blocks unregistered "/word" text client-side, so raw "/model" never reaches
+// a bot. This single registered command is the workaround: "/cerry model foo" gets
+// reconstructed as "/model foo" and forwarded like any other question.
+app.command('/cerry', async ({ command, ack, client }) => {
+  await ack();
+  const text = `/${command.text}`;
+  const channel = command.channel_id;
+  const headerMsg = await client.chat.postMessage({
+    channel,
+    text: `<@${command.user_id}> ${text}`,
+  });
+  const sessionKey = `channel:${channel}:${headerMsg.ts}`;
+  await handleQuestion({
+    client,
+    event: { ts: headerMsg.ts, channel, user: command.user_id, files: [] },
+    sessionKey,
+    rawText: text,
+  });
 });
 
 await app.start();
