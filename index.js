@@ -93,13 +93,22 @@ async function runTurn({ client, channel, threadTs, sessionKey, text, files }) {
 
   sessions.set(sessionKey, { sdkSessionId });
 
+  // chat.update is a silent edit — Slack doesn't push-notify for it. The status
+  // message (생각 중/작업 중) stays an edit since it's just process noise, but the
+  // actual answer has to be a fresh postMessage or nobody gets notified about it.
   await client.chat.update({
     channel,
     ts: statusMsg.ts,
+    text: ':white_check_mark: 답변 완료',
+  });
+
+  const answerMsg = await client.chat.postMessage({
+    channel,
+    thread_ts: threadTs,
     text: finalText || '(응답 없음)',
   });
 
-  return statusMsg.ts;
+  return answerMsg.ts;
 }
 
 async function handleQuestion({ client, event, sessionKey, rawText }) {
