@@ -6,6 +6,7 @@ dotenv.config({ path: join(homedir(), '.secrets', 'agents-in-slack.env') });
 import pkg from '@slack/bolt';
 const { App } = pkg;
 import { query } from '@anthropic-ai/claude-agent-sdk';
+import { createServer } from 'node:http';
 
 const app = new App({
   token: process.env.SLACK_BOT_TOKEN,
@@ -61,7 +62,7 @@ async function runTurn({ client, channel, threadTs, sessionKey, text, files, use
         })()
       : text,
     options: {
-      resume: session?.sdkSessionId,
+      resume: session?.sdkSessionId ?? undefined, // pre-registered sessions hold null, not undefined
       cwd: homedir(),
       permissionMode: 'bypassPermissions',
       allowDangerouslySkipPermissions: true,
@@ -121,6 +122,11 @@ async function handleQuestion({ client, event, sessionKey, rawText }) {
   const text = stripMention(rawText);
   const threadTs = event.thread_ts || event.ts;
   const isLogSave = LOG_SAVE_RE.test(text);
+
+  // Register on first tag, not after the turn finishes — otherwise the very
+  // first turn is invisible to the session list (and a turn that inspects the
+  // list never sees itself, since it's still running).
+  if (!sessions.has(sessionKey)) sessions.set(sessionKey, { sdkSessionId: null });
 
   await runTurn({
     client,
@@ -189,6 +195,18 @@ app.command('/cerry', async ({ command, ack, client }) => {
     rawText: text,
   });
 });
+
+// Sessions live only in this process's memory, so there's no way to inspect or
+// close one from a terminal. This localhost-only endpoint is that window:
+//   curl -s localhost:7391                 → 활성 세션 목록
+//   curl -sX DELETE localhost:7391/<key>   → 해당 세션 종료 (로그·✅ 없이 그냥 닫기)
+// 127.0.0.1 bound: reachable only from this Mac, whose shell users already have
+// the bot's own (bypassPermissions) reach anyway.
+createServer((req, res) => {
+  const key = decodeURIComponent(req.url.slice(1));
+  if (req.method === 'DELETE' && sessions.delete(key)) return res.end('closed\n');
+  res.end(([...sessions.keys()].join('\n') || '활성 세션 없음') + '\n');
+}).listen(7391, '127.0.0.1');
 
 await app.start();
 const auth = await app.client.auth.test();
