@@ -110,7 +110,7 @@ async function runTurn({ client, channel, threadTs, sessionKey, text, files, use
     }
   }
 
-  sessions.set(sessionKey, { sdkSessionId });
+  sessions.set(sessionKey, { sdkSessionId, ctxTokens });
 
   // chat.update is a silent edit — Slack doesn't push-notify for it. The status
   // message (생각 중/작업 중) stays an edit since it's just process noise, but the
@@ -232,7 +232,12 @@ app.command('/cerry', async ({ command, ack, client }) => {
 createServer((req, res) => {
   const key = decodeURIComponent(req.url.slice(1));
   if (req.method === 'DELETE' && sessions.delete(key)) return res.end('closed\n');
-  res.end(([...sessions.keys()].join('\n') || '활성 세션 없음') + '\n');
+  // "<key>\t<context tokens>" — key stays the first field so the shell helpers
+  // can still pipe this straight into DELETE.
+  const lines = [...sessions.entries()].map(
+    ([k, s]) => `${k}\t${(s.ctxTokens ?? 0).toLocaleString()} 토큰`,
+  );
+  res.end((lines.join('\n') || '활성 세션 없음') + '\n');
 }).listen(7391, '127.0.0.1');
 
 await app.start();
