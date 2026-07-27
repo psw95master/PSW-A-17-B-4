@@ -20,6 +20,13 @@ const sessions = new Map();
 const handledTs = new Set();
 const LOG_SAVE_RE = /로그\s*저장/;
 
+// Every turn replays the whole conversation, so a session left open keeps getting
+// more expensive per message (a previous build hit ~370k tokens on one thread).
+// Past this many context tokens the session is cut loose and the next message
+// starts fresh. Transcripts stay on disk either way, so nothing is lost.
+// Tune with SESSION_RESET_TOKENS in ~/.secrets/agents-in-slack.env; 0 disables.
+const SESSION_RESET_TOKENS = Number(process.env.SESSION_RESET_TOKENS ?? 150000);
+
 let botUserId = null;
 
 function stripMention(text) {
@@ -72,9 +79,20 @@ async function runTurn({ client, channel, threadTs, sessionKey, text, files, use
   let finalText = '';
   let sawToolUse = false;
   let sdkSessionId = session?.sdkSessionId ?? null;
+  let ctxTokens = 0;
 
   for await (const msg of q) {
     sdkSessionId = msg.session_id ?? sdkSessionId;
+
+    // The closing 'result' message carries this turn's usage. Cache reads/creations
+    // count as context too — they're what the replayed conversation costs.
+    if (msg.type === 'result') {
+      const u = msg.usage ?? {};
+      ctxTokens =
+        (u.input_tokens ?? 0) +
+        (u.cache_read_input_tokens ?? 0) +
+        (u.cache_creation_input_tokens ?? 0);
+    }
 
     if (msg.type === 'assistant') {
       const blocks = msg.message?.content ?? [];
@@ -106,13 +124,13 @@ async function runTurn({ client, channel, threadTs, sessionKey, text, files, use
   // Thread-reply push notifications are far less reliable without an explicit
   // mention — "all new posts" channel settings mainly govern top-level messages.
   const mention = user ? `<@${user}> ` : '';
-  const answerMsg = await client.chat.postMessage({
+  await client.chat.postMessage({
     channel,
     thread_ts: threadTs,
     text: `${mention}${finalText || '(응답 없음)'}`,
   });
 
-  return answerMsg.ts;
+  return ctxTokens;
 }
 
 async function handleQuestion({ client, event, sessionKey, rawText }) {
@@ -128,7 +146,7 @@ async function handleQuestion({ client, event, sessionKey, rawText }) {
   // list never sees itself, since it's still running).
   if (!sessions.has(sessionKey)) sessions.set(sessionKey, { sdkSessionId: null });
 
-  await runTurn({
+  const ctxTokens = await runTurn({
     client,
     channel: event.channel,
     threadTs,
@@ -141,6 +159,15 @@ async function handleQuestion({ client, event, sessionKey, rawText }) {
   if (isLogSave) {
     await client.reactions.add({ channel: event.channel, timestamp: threadTs, name: 'white_check_mark' });
     sessions.delete(sessionKey);
+  } else if (SESSION_RESET_TOKENS > 0 && ctxTokens >= SESSION_RESET_TOKENS) {
+    sessions.delete(sessionKey);
+    await client.chat.postMessage({
+      channel: event.channel,
+      thread_ts: threadTs,
+      text:
+        `:broom: 대화 맥락이 ${ctxTokens.toLocaleString()} 토큰까지 커져서 자동으로 정리했어요.\n` +
+        `다음 메시지부터 새 세션으로 시작해 토큰이 다시 가벼워집니다. (기록은 디스크에 그대로 남아 있어요)`,
+    });
   }
 }
 
